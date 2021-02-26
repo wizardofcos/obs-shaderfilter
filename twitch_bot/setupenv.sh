@@ -1,0 +1,3 @@
+export BOT_USERNAME=cosmodirty
+export CHANNEL_NAME=cosmodirty
+export OAUTH_TOKEN=oauth:62ko1b6uonml3qmw8ov0h62za546fc

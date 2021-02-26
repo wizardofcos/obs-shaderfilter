@@ -14,7 +14,11 @@
 #include <stdio.h>
 #include <time.h>
 
-#include <util/threading.h>	   
+#include <util/threading.h>
+
+#include <sys/types.h>
+#include <unistd.h>
+
 
 /* clang-format off */
 
@@ -66,6 +70,15 @@ float4 mainImage(VertData v_in) : TARGET\r\
 }\r\
 ";
 
+static const char *effect_template_red_image_shader =
+"\r\
+float4 mainImage(VertData v_in) : TARGET\r\
+{\r\
+	return float4(1.0, 0.0, 0.0, 1.0) * image.Sample(textureSampler, v_in.uv);;\r\
+}\r\
+";
+
+
 static const char *effect_template_end =
 "\
 technique Draw\
@@ -112,12 +125,12 @@ struct shader_filter_data
 	gs_eparam_t *param_uv_scale;
 	gs_eparam_t *param_uv_pixel_interval;
 	gs_eparam_t *param_uv_size;
-	gs_eparam_t *param_elapsed_time;	
+	gs_eparam_t *param_elapsed_time;
 	gs_eparam_t *param_loops;
 	gs_eparam_t *param_local_time;
 	gs_eparam_t *param_rand_f;
 	gs_eparam_t *param_rand_instance_f;
-	gs_eparam_t *param_rand_activation_f;  	
+	gs_eparam_t *param_rand_activation_f;
 
 	int expand_left;
 	int expand_right;
@@ -130,12 +143,12 @@ struct shader_filter_data
 	bool use_sources;  //consider using name instead, "source_name" or use annotation
 	bool use_shader_elapsed_time;
 	bool no_repeat;
-	
+
 	struct vec2 uv_offset;
 	struct vec2 uv_scale;
 	struct vec2 uv_pixel_interval;
 	struct vec2 uv_size;
-	float elapsed_time;	 	
+	float elapsed_time;
 	float elapsed_time_loop;
 	int   loops;
 	float local_time;
@@ -146,6 +159,8 @@ struct shader_filter_data
 	DARRAY(struct effect_param_data) stored_param_list;
 };
 
+struct shader_filter_data *global_filter;
+bool use_red_shader = false;
 
 static unsigned int rand_interval(unsigned int min, unsigned int max)
 {
@@ -169,7 +184,7 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 {
 	obs_data_t *settings = obs_source_get_settings(filter->context);
 
-	// First, clean up the old effect and all references to it. 
+	// First, clean up the old effect and all references to it.
 	filter->shader_start_time = 0.0;
 	size_t param_count = filter->stored_param_list.num;
 	for (size_t param_index = 0; param_index < param_count; param_index++)
@@ -193,7 +208,7 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 	filter->param_uv_pixel_interval = NULL;
 	filter->param_uv_scale = NULL;
 	filter->param_uv_size = NULL;
-	filter->param_rand_f = NULL;	
+	filter->param_rand_f = NULL;
 	filter->param_rand_activation_f = NULL;
 	filter->param_loops = NULL;
 	filter->param_local_time = NULL;
@@ -206,7 +221,7 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 		obs_leave_graphics();
 	}
 
-	// Load text and build the effect from the template, if necessary. 
+	// Load text and build the effect from the template, if necessary.
 	const char *shader_text = NULL;
 	bool use_template =
 		!obs_data_get_bool(settings, "override_entire_effect");
@@ -228,10 +243,15 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 	}
 
 	size_t effect_header_length = strlen(effect_template_begin);
-	size_t effect_body_length = strlen(shader_text);
+	size_t effect_body_length;
+	if (use_red_shader) {
+		effect_body_length = strlen(effect_template_red_image_shader);
+	} else {
+		effect_body_length = strlen(shader_text);
+	}
 	size_t effect_footer_length = strlen(effect_template_end);
 	size_t effect_buffer_total_size = effect_header_length + effect_body_length + effect_footer_length;
-	
+
 	bool use_sliders = !obs_data_get_bool(settings, "use_sliders");
 	bool use_sources = !obs_data_get_bool(settings, "use_sources");
 	bool use_shader_elapsed_time = !obs_data_get_bool(settings, "use_shader_elapsed_time");
@@ -242,15 +262,19 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 	{
 		dstr_cat(&effect_text, effect_template_begin);
 	}
+	if (use_red_shader) {
+		dstr_cat(&effect_text, effect_template_red_image_shader);
+	} else {
+		dstr_cat(&effect_text, shader_text);
+	}
 
-	dstr_cat(&effect_text, shader_text);
 
 	if (use_template)
 	{
 		dstr_cat(&effect_text, effect_template_end);
 	}
 
-	// Create the effect. 
+	// Create the effect.
 	char *errors = NULL;
 
 	obs_enter_graphics();
@@ -264,7 +288,7 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 		blog(LOG_WARNING, "[obs-shaderfilter] Unable to create effect. Errors returned from parser:\n%s", (errors == NULL || strlen(errors) == 0 ? "(None)" : errors));
 	}
 
-	// Store references to the new effect's parameters. 
+	// Store references to the new effect's parameters.
 	da_init(filter->stored_param_list);
 
 	size_t effect_count = gs_effect_get_num_params(filter->effect);
@@ -319,13 +343,13 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 			// Nothing.
 		}
 		else
-		{			
+		{
 			struct effect_param_data *cached_data = da_push_back_new(filter->stored_param_list);
 			dstr_copy(&cached_data->name, info.name);
 			cached_data->type = info.type;
 			cached_data->param = param;
 		}
-	}	
+	}
 }
 
 static const char *shader_filter_get_name(void *unused)
@@ -497,7 +521,7 @@ static obs_properties_t *shader_filter_properties(void *data)
 	for (size_t param_index = 0; param_index < param_count; param_index++)
 	{
 		struct effect_param_data *param = (filter->stored_param_list.array + param_index);
-		gs_eparam_t* annot = gs_param_get_annotation_by_idx(param->param, param_index);		
+		gs_eparam_t* annot = gs_param_get_annotation_by_idx(param->param, param_index);
 		const char *param_name = param->name.array;
 		struct dstr display_name = {0};
 		dstr_ncat(&display_name, param_name, param->name.len);
@@ -530,7 +554,7 @@ static obs_properties_t *shader_filter_properties(void *data)
 			}
 			break;
 		case GS_SHADER_PARAM_INT3:
-			
+
 			break;
 		case GS_SHADER_PARAM_VEC4:
 			obs_properties_add_color(props, param_name, display_name.array);
@@ -545,14 +569,22 @@ static obs_properties_t *shader_filter_properties(void *data)
 		dstr_free(&display_name);
 	}
 
-	dstr_free(&examples_path);	
+	dstr_free(&examples_path);
 	UNUSED_PARAMETER(data);
 	return props;
 }
 
+void handle_sigint(int sig)
+{
+    use_red_shader = !use_red_shader;
+		shader_filter_reload_effect(global_filter);
+}
+
 static void shader_filter_update(void *data, obs_data_t *settings)
 {
+
 	struct shader_filter_data *filter = data;
+    global_filter = filter;
 
 	// Get expansions. Will be used in the video_tick() callback.
 
@@ -576,7 +608,7 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 	for (size_t param_index = 0; param_index < param_count; param_index++)
 	{
 		struct effect_param_data *param = (filter->stored_param_list.array + param_index);
-		gs_eparam_t* annot = gs_param_get_annotation_by_idx(param->param, param_index);		
+		gs_eparam_t* annot = gs_param_get_annotation_by_idx(param->param, param_index);
 		const char* param_name = param->name.array;
 		struct dstr display_name = { 0 };
 		dstr_ncat(&display_name, param_name, param->name.len);
@@ -632,7 +664,7 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 			break;
 		case GS_SHADER_PARAM_STRING:
 			if (gs_effect_get_default_val(param->param) != NULL)
-				obs_data_set_default_string(settings, param_name, (const char *)gs_effect_get_default_val(param->param));			
+				obs_data_set_default_string(settings, param_name, (const char *)gs_effect_get_default_val(param->param));
 			param->value.string = (char)obs_data_get_string(settings, param_name);
 			break;
 		}
@@ -654,7 +686,7 @@ static void shader_filter_tick(void *data, float seconds)
 	filter->total_height = filter->expand_top
 		+ base_height
 		+ filter->expand_bottom;
-	
+
 	filter->uv_size.x = (float)filter->total_width;
 	filter->uv_size.y = (float)filter->total_height;
 
@@ -681,10 +713,10 @@ static void shader_filter_tick(void *data, float seconds)
 			filter->loops = -filter->loops;
 	}
 	filter->local_time = (float)(os_gettime_ns() / 1000000000.0);
-	
 
-	// undecided between this and "rand_float(1);" 
-	filter->rand_f = (float)((double)rand_interval(0, 10000) / (double)10000); 
+
+	// undecided between this and "rand_float(1);"
+	filter->rand_f = (float)((double)rand_interval(0, 10000) / (double)10000);
 }
 
 
@@ -826,10 +858,15 @@ struct obs_source_info shader_filter = {
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("obs-shaderfilter", "en-US")
 
+
+
 bool obs_module_load(void)
 {
 	obs_register_source(&shader_filter);
+    signal(SIGINT, handle_sigint);
+		pid_t pid = getpid();
 
+	  printf("pid: %lun", pid);
 	return true;
 }
 
